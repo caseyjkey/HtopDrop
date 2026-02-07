@@ -24,7 +24,9 @@ class HtopDropVisualizer:
             height: Window height
             fullscreen: Run in fullscreen mode
         """
+        # Initialize pygame modules explicitly
         pygame.init()
+        pygame.font.init()
 
         # Display setup
         flags = pygame.FULLSCREEN if fullscreen else 0
@@ -55,7 +57,11 @@ class HtopDropVisualizer:
         }
 
         # Font for debug info
-        self.font = pygame.font.SysFont('monospace', 16)
+        try:
+            self.font = pygame.font.SysFont('monospace', 16)
+        except:
+            # Fallback to default font if monospace not available
+            self.font = pygame.font.Font(None, 16)
         self.show_debug = True
 
     def draw_audio_zone(self, surface: pygame.Surface, data: Dict, zone: pygame.Rect):
