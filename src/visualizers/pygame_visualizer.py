@@ -24,9 +24,8 @@ class HtopDropVisualizer:
             height: Window height
             fullscreen: Run in fullscreen mode
         """
-        # Initialize pygame modules explicitly
+        # Initialize pygame modules
         pygame.init()
-        pygame.font.init()
 
         # Display setup
         flags = pygame.FULLSCREEN if fullscreen else 0
@@ -58,11 +57,14 @@ class HtopDropVisualizer:
 
         # Font for debug info
         try:
+            pygame.font.init()
             self.font = pygame.font.SysFont('monospace', 16)
-        except:
-            # Fallback to default font if monospace not available
-            self.font = pygame.font.Font(None, 16)
-        self.show_debug = True
+            self.show_debug = True
+        except Exception as e:
+            print(f"WARNING: Font rendering not available: {e}")
+            print("Debug overlay will be disabled")
+            self.font = None
+            self.show_debug = False
 
     def draw_audio_zone(self, surface: pygame.Surface, data: Dict, zone: pygame.Rect):
         """
@@ -211,6 +213,9 @@ class HtopDropVisualizer:
 
     def draw_debug_info(self, surface: pygame.Surface, data: Dict, fps: float):
         """Draw debug information overlay."""
+        if not self.font:
+            return  # Skip if font not available
+
         y_offset = 10
         line_height = 20
 
