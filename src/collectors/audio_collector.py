@@ -77,14 +77,26 @@ class AudioCollector:
 
         print(f"AudioCollector: Starting microphone capture at {self.SAMPLE_RATE}Hz")
 
-        self.stream = sd.InputStream(
-            device=self.device,
-            channels=1,
-            samplerate=self.SAMPLE_RATE,
-            blocksize=self.CHUNK_SIZE,
-            callback=self._audio_callback
-        )
-        self.stream.start()
+        try:
+            # Check if device supports input
+            if self.device is not None:
+                dev_info = sd.query_devices(self.device)
+                if dev_info['max_input_channels'] == 0:
+                    print(f"WARNING: Device {self.device} has no input channels (output-only)")
+                    print("AudioCollector: Running in SILENT mode (no microphone)")
+                    return
+
+            self.stream = sd.InputStream(
+                device=self.device,
+                channels=1,
+                samplerate=self.SAMPLE_RATE,
+                blocksize=self.CHUNK_SIZE,
+                callback=self._audio_callback
+            )
+            self.stream.start()
+        except Exception as e:
+            print(f"WARNING: Audio stream failed to start: {e}")
+            print("AudioCollector: Running in SILENT mode (no microphone)")
 
     def stop_stream(self):
         """Stop audio capture."""
