@@ -28,15 +28,20 @@ class NvidiaCollector:
 
     def _check_nvidia_smi(self) -> bool:
         """Check if nvidia-smi is available."""
-        try:
-            result = subprocess.run(
-                ['nvidia-smi', '--version'],
-                capture_output=True,
-                timeout=2
-            )
-            return result.returncode == 0
-        except (FileNotFoundError, subprocess.TimeoutExpired):
-            return False
+        for path in ['nvidia-smi', '/usr/bin/nvidia-smi', '/usr/local/bin/nvidia-smi']:
+            try:
+                result = subprocess.run(
+                    [path, '--query-gpu=temperature.gpu', '--format=csv,noheader'],
+                    capture_output=True,
+                    timeout=3
+                )
+                if result.returncode == 0:
+                    self._nvidia_smi_path = path
+                    return True
+            except (FileNotFoundError, subprocess.TimeoutExpired):
+                continue
+        self._nvidia_smi_path = 'nvidia-smi'
+        return False
 
     def get_stats(self) -> Dict[str, float]:
         """
@@ -69,7 +74,7 @@ class NvidiaCollector:
             # Query: temperature, memory.used, memory.total
             result = subprocess.run(
                 [
-                    'nvidia-smi',
+                    self._nvidia_smi_path,
                     '--query-gpu=temperature.gpu,memory.used,memory.total',
                     '--format=csv,noheader,nounits'
                 ],

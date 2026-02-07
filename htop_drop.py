@@ -8,7 +8,7 @@ Launches data collectors and visualizer.
 import sys
 import argparse
 from src.data_aggregator import DataAggregator
-from src.visualizers.pygame_visualizer import HtopDropVisualizer
+from src.visualizers.shader_visualizer import ShaderVisualizer
 
 
 def main():
@@ -69,7 +69,7 @@ def main():
                 time.sleep(0.1)
         else:
             # Visualization mode
-            visualizer = HtopDropVisualizer(
+            visualizer = ShaderVisualizer(
                 width=args.width,
                 height=args.height,
                 fullscreen=args.fullscreen
@@ -78,7 +78,6 @@ def main():
             print("\n" + "="*60)
             print("Visualizer Controls:")
             print("  ESC or Q : Quit")
-            print("  D        : Toggle debug overlay")
             print("  F        : Toggle fullscreen")
             print("="*60 + "\n")
 
