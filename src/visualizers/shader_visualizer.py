@@ -398,22 +398,25 @@ class ShaderVisualizer:
         self.smooth[key] = factor * value + (1.0 - factor) * self.smooth[key]
         return self.smooth[key]
 
+    def _set_uniform(self, name: str, value):
+        """Set a uniform, silently skipping if optimized out by compiler."""
+        if name in self.main_prog:
+            self.main_prog[name].value = value
+
     def _set_uniforms(self, data: Dict):
         """Set all shader uniforms from data."""
-        prog = self.main_prog
-
         htop = data.get('htop', {})
         nvidia = data.get('nvidia', {})
         audio = data.get('audio', {})
 
-        prog['time'].value = self.time
-        prog['resolution'].value = (float(self.width), float(self.height))
+        self._set_uniform('time', self.time)
+        self._set_uniform('resolution', (float(self.width), float(self.height)))
 
         # CPU (normalize to 0-1)
-        prog['cpu_avg'].value = self._smooth('cpu_avg', htop.get('cpu_avg', 0) / 100.0)
-        prog['mem_pct'].value = self._smooth('mem_pct', htop.get('memory', 0) / 100.0)
-        prog['swap_pct'].value = self._smooth('swap_pct', htop.get('swap', 0) / 100.0)
-        prog['load_avg'].value = self._smooth('load_avg', htop.get('load_avg', 0) / 100.0)
+        self._set_uniform('cpu_avg', self._smooth('cpu_avg', htop.get('cpu_avg', 0) / 100.0))
+        self._set_uniform('mem_pct', self._smooth('mem_pct', htop.get('memory', 0) / 100.0))
+        self._set_uniform('swap_pct', self._smooth('swap_pct', htop.get('swap', 0) / 100.0))
+        self._set_uniform('load_avg', self._smooth('load_avg', htop.get('load_avg', 0) / 100.0))
 
         cores = (
             self._smooth('core0', htop.get('core0', 0) / 100.0),
@@ -421,16 +424,16 @@ class ShaderVisualizer:
             self._smooth('core2', htop.get('core2', 0) / 100.0),
             self._smooth('core3', htop.get('core3', 0) / 100.0),
         )
-        prog['cores'].value = cores
+        self._set_uniform('cores', cores)
 
         # GPU
-        prog['gpu_temp'].value = self._smooth('gpu_temp', nvidia.get('temperature', 0), 0.05)
-        prog['gpu_mem'].value = self._smooth('gpu_mem', nvidia.get('memory_percent', 0) / 100.0, 0.05)
+        self._set_uniform('gpu_temp', self._smooth('gpu_temp', nvidia.get('temperature', 0), 0.05))
+        self._set_uniform('gpu_mem', self._smooth('gpu_mem', nvidia.get('memory_percent', 0) / 100.0, 0.05))
 
         # Audio (more responsive smoothing)
-        prog['bass'].value = self._smooth('bass', audio.get('bass', 0) / 100.0, 0.4)
-        prog['mid'].value = self._smooth('mid', audio.get('mid', 0) / 100.0, 0.35)
-        prog['treb'].value = self._smooth('treb', audio.get('treb', 0) / 100.0, 0.3)
+        self._set_uniform('bass', self._smooth('bass', audio.get('bass', 0) / 100.0, 0.4))
+        self._set_uniform('mid', self._smooth('mid', audio.get('mid', 0) / 100.0, 0.35))
+        self._set_uniform('treb', self._smooth('treb', audio.get('treb', 0) / 100.0, 0.3))
 
     def render(self, data: Dict) -> bool:
         """Render one frame. Returns False if quit requested."""
