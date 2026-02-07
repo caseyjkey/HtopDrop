@@ -6,6 +6,7 @@ Collects CPU, memory, and swap statistics using psutil.
 Maps data to Q variables for visualization.
 """
 
+import os
 import psutil
 import time
 from typing import Dict, List
@@ -21,10 +22,12 @@ class HtopCollector:
         """
         self.update_interval = update_interval
         self.cpu_count = psutil.cpu_count()
+        self._own_pid = os.getpid()
+        self._own_process = psutil.Process(self._own_pid)
 
     def get_stats(self) -> Dict[str, float]:
         """
-        Collect current system statistics.
+        Collect current system statistics, excluding our own process.
 
         Returns:
             Dict with keys matching Q variable assignments:
@@ -40,11 +43,21 @@ class HtopCollector:
         cpu_percent = psutil.cpu_percent(interval=None)  # Non-blocking
         cpu_per_core = psutil.cpu_percent(interval=None, percpu=True)
 
-        stats['q1'] = cpu_percent  # Average CPU usage
+        # Subtract our own CPU usage so visualizer doesn't measure itself
+        try:
+            own_cpu = self._own_process.cpu_percent(interval=None)
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            own_cpu = 0.0
+        adjusted_cpu = max(0.0, cpu_percent - own_cpu)
+
+        stats['q1'] = adjusted_cpu  # Average CPU usage (excluding self)
 
         # Individual cores (limit to 4 for Q variables q4-q7)
+        # Distribute own CPU removal proportionally
+        cpu_count = self.cpu_count if self.cpu_count else 1
+        own_per_core = own_cpu / cpu_count
         for i, core_usage in enumerate(cpu_per_core[:4]):
-            stats[f'q{4+i}'] = core_usage
+            stats[f'q{4+i}'] = max(0.0, core_usage - own_per_core)
 
         # Memory stats
         mem = psutil.virtual_memory()

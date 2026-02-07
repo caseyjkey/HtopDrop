@@ -3,18 +3,14 @@
 Shader-based MilkDrop-style Visualizer
 
 Uses OpenGL fragment shaders for flowing, psychedelic visuals.
-Each data source drives distinct organic visual elements:
-  - CPU: Swirling plasma warp patterns
-  - Memory: Color palette shifting
-  - GPU temp: Lava lamp blobs with sinusoidal edges
-  - GPU memory: Blob density/size
-  - Audio: Radial pulse, ripple, brightness
+Designed to be beautiful even at idle - metrics modulate an always-alive base.
+
+Performance target: ~30fps on GT540M (low-power GPU)
 """
 
 import pygame
 import moderngl
 import numpy as np
-import struct
 from typing import Dict
 
 
@@ -31,7 +27,8 @@ void main() {
 }
 """
 
-# Main visualization shader with feedback loop
+# Main visualization shader - designed to be always beautiful, even at idle.
+# Metrics MODULATE the base animation rather than creating it.
 FRAGMENT_SHADER = """
 #version 330 core
 
@@ -39,16 +36,14 @@ uniform sampler2D prev_frame;
 uniform float time;
 uniform vec2 resolution;
 
-// System data
+// System data (all 0-1 normalized)
 uniform float cpu_avg;
 uniform float mem_pct;
-uniform float swap_pct;
-uniform vec4 cores;       // 4 CPU core values (0-1)
-uniform float load_avg;
+uniform vec4 cores;
 
 // GPU data
-uniform float gpu_temp;   // 0-100 celsius
-uniform float gpu_mem;    // 0-1 percentage
+uniform float gpu_temp;   // celsius (raw, 0-100)
+uniform float gpu_mem;    // 0-1
 
 // Audio data
 uniform float bass;
@@ -58,120 +53,36 @@ uniform float treb;
 in vec2 uv;
 out vec4 fragColor;
 
-// ── Noise functions ──────────────────────────────────────────────
+// ── Lightweight noise (2 octaves max for GT540M) ────────────────
 
-vec3 mod289(vec3 x) { return x - floor(x * (1.0/289.0)) * 289.0; }
-vec2 mod289(vec2 x) { return x - floor(x * (1.0/289.0)) * 289.0; }
-vec3 permute(vec3 x) { return mod289(((x*34.0)+1.0)*x); }
-
-float snoise(vec2 v) {
-    const vec4 C = vec4(0.211324865405187, 0.366025403784439,
-                       -0.577350269189626, 0.024390243902439);
-    vec2 i  = floor(v + dot(v, C.yy));
-    vec2 x0 = v - i + dot(i, C.xx);
-    vec2 i1 = (x0.x > x0.y) ? vec2(1.0, 0.0) : vec2(0.0, 1.0);
-    vec4 x12 = x0.xyxy + C.xxzz;
-    x12.xy -= i1;
-    i = mod289(i);
-    vec3 p = permute(permute(i.y + vec3(0.0, i1.y, 1.0))
-                            + i.x + vec3(0.0, i1.x, 1.0));
-    vec3 m = max(0.5 - vec3(dot(x0,x0), dot(x12.xy,x12.xy),
-                            dot(x12.zw,x12.zw)), 0.0);
-    m = m*m; m = m*m;
-    vec3 x = 2.0 * fract(p * C.www) - 1.0;
-    vec3 h = abs(x) - 0.5;
-    vec3 ox = floor(x + 0.5);
-    vec3 a0 = x - ox;
-    m *= 1.79284291400159 - 0.85373472095314 * (a0*a0 + h*h);
-    vec3 g;
-    g.x = a0.x * x0.x + h.x * x0.y;
-    g.yz = a0.yz * x12.xz + h.yz * x12.yw;
-    return 130.0 * dot(m, g);
+vec2 hash22(vec2 p) {
+    vec3 p3 = fract(vec3(p.xyx) * vec3(.1031, .1030, .0973));
+    p3 += dot(p3, p3.yzx + 33.33);
+    return fract((p3.xx + p3.yz) * p3.zy);
 }
 
-float fbm(vec2 p, int octaves) {
-    float val = 0.0;
-    float amp = 0.5;
-    float freq = 1.0;
-    for (int i = 0; i < 6; i++) {
-        if (i >= octaves) break;
-        val += amp * snoise(p * freq);
-        freq *= 2.0;
-        amp *= 0.5;
-    }
-    return val;
+float noise(vec2 p) {
+    vec2 i = floor(p);
+    vec2 f = fract(p);
+    f = f * f * (3.0 - 2.0 * f);  // smoothstep
+
+    float a = dot(hash22(i + vec2(0,0)) - 0.5, f - vec2(0,0));
+    float b = dot(hash22(i + vec2(1,0)) - 0.5, f - vec2(1,0));
+    float c = dot(hash22(i + vec2(0,1)) - 0.5, f - vec2(0,1));
+    float d = dot(hash22(i + vec2(1,1)) - 0.5, f - vec2(1,1));
+
+    return mix(mix(a, b, f.x), mix(c, d, f.x), f.y) + 0.5;
 }
 
-// ── Color palettes ──────────────────────────────────────────────
+// Simple 2-octave fbm
+float fbm2(vec2 p) {
+    return noise(p) * 0.65 + noise(p * 2.1 + 3.7) * 0.35;
+}
+
+// ── Color palettes (Inigo Quilez style) ─────────────────────────
 
 vec3 palette(float t, vec3 a, vec3 b, vec3 c, vec3 d) {
     return a + b * cos(6.28318 * (c * t + d));
-}
-
-vec3 cosmicPalette(float t) {
-    return palette(t,
-        vec3(0.5, 0.5, 0.5),
-        vec3(0.5, 0.5, 0.5),
-        vec3(1.0, 1.0, 1.0),
-        vec3(0.0, 0.33, 0.67)
-    );
-}
-
-vec3 firePalette(float t) {
-    return palette(t,
-        vec3(0.5, 0.5, 0.5),
-        vec3(0.5, 0.5, 0.5),
-        vec3(1.0, 0.7, 0.4),
-        vec3(0.0, 0.15, 0.20)
-    );
-}
-
-vec3 oceanPalette(float t) {
-    return palette(t,
-        vec3(0.5, 0.5, 0.5),
-        vec3(0.5, 0.5, 0.5),
-        vec3(1.0, 1.0, 0.5),
-        vec3(0.80, 0.90, 0.30)
-    );
-}
-
-// ── Lava lamp / metaball for GPU ────────────────────────────────
-
-float metaball(vec2 p, vec2 center, float radius) {
-    float d = length(p - center);
-    return radius * radius / (d * d + 0.001);
-}
-
-float lavaLamp(vec2 p, float t, float temp_norm, float mem_norm) {
-    float field = 0.0;
-
-    // Number of blobs scales with memory usage (more memory = more blobs)
-    int num_blobs = 3 + int(mem_norm * 5.0);
-
-    for (int i = 0; i < 8; i++) {
-        if (i >= num_blobs) break;
-        float fi = float(i);
-
-        // Each blob has unique sinusoidal motion
-        float phase = fi * 1.618;  // Golden ratio spacing
-        float speed = 0.3 + temp_norm * 0.5;  // Hotter = faster
-
-        // Sinusoidal position - rises and falls like real lava
-        float x = 0.3 + 0.4 * sin(t * speed * 0.7 + phase * 2.1);
-        float y = 0.2 + 0.6 * (0.5 + 0.5 * sin(t * speed * 0.4 + phase));
-
-        // Blob size oscillates with sinusoidal edge
-        float base_radius = 0.06 + 0.04 * sin(t * 1.3 + fi);
-        // Sinusoidal wobble on the edge
-        float angle = atan(p.y - y, p.x - x);
-        float wobble = 1.0 + 0.3 * sin(angle * 3.0 + t * 2.0 + fi)
-                            + 0.15 * sin(angle * 5.0 - t * 1.5 + fi * 0.7);
-        float radius = base_radius * wobble;
-
-        field += metaball(p, vec2(x, y), radius);
-    }
-
-    return field;
 }
 
 // ── Main shader ─────────────────────────────────────────────────
@@ -181,133 +92,152 @@ void main() {
     vec2 centered = st - 0.5;
     float aspect = resolution.x / resolution.y;
     centered.x *= aspect;
-
     float r = length(centered);
     float angle = atan(centered.y, centered.x);
 
-    // ── Feedback warp (MilkDrop-style trail effect) ──
+    // ════════════════════════════════════════════════════════════
+    // FEEDBACK: Sample previous frame with warp (MilkDrop trails)
+    // ════════════════════════════════════════════════════════════
 
-    // CPU drives warp intensity and rotation
-    float warp_strength = 0.003 + cpu_avg * 0.012;
-    float warp_rotation = time * (0.1 + cpu_avg * 0.3);
+    // Always-on gentle rotation + zoom (the "alive" base motion)
+    float base_speed = 0.15;
+    float cpu_boost = cpu_avg * 0.6;  // CPU makes it swirl faster
+    float rot_speed = base_speed + cpu_boost;
 
-    // Create warped UV for sampling previous frame
-    vec2 warp_offset;
-    warp_offset.x = sin(angle * 2.0 + warp_rotation) * warp_strength;
-    warp_offset.y = cos(angle * 3.0 + warp_rotation * 0.7) * warp_strength;
+    vec2 warp;
+    warp.x = sin(angle * 2.0 + time * rot_speed) * (0.003 + cpu_avg * 0.008);
+    warp.y = cos(angle * 3.0 + time * rot_speed * 0.7) * (0.003 + cpu_avg * 0.008);
 
-    // Zoom warp - bass makes it breathe
-    float zoom = 1.0 - 0.002 - bass * 0.008;
-    vec2 warped_uv = 0.5 + (st - 0.5) * zoom + warp_offset;
+    // Per-core quadrant distortion (subtle but distinct per core)
+    float qx = step(0.0, centered.x) * 2.0 - 1.0;
+    float qy = step(0.0, centered.y) * 2.0 - 1.0;
+    float core_val = (qx > 0.0 && qy > 0.0) ? cores.x :
+                     (qx < 0.0 && qy > 0.0) ? cores.y :
+                     (qx < 0.0 && qy < 0.0) ? cores.z : cores.w;
+    warp += vec2(sin(time * 2.0 + core_val * 5.0),
+                 cos(time * 1.7 + core_val * 4.0)) * core_val * 0.004;
 
-    // Per-core warp: each core distorts a quadrant
-    if (centered.x > 0.0 && centered.y > 0.0)
-        warped_uv += vec2(sin(time*3.0), cos(time*2.7)) * cores.x * 0.003;
-    else if (centered.x < 0.0 && centered.y > 0.0)
-        warped_uv += vec2(cos(time*2.5), sin(time*3.1)) * cores.y * 0.003;
-    else if (centered.x < 0.0 && centered.y < 0.0)
-        warped_uv += vec2(sin(time*2.8), cos(time*2.3)) * cores.z * 0.003;
-    else
-        warped_uv += vec2(cos(time*3.3), sin(time*2.1)) * cores.w * 0.003;
+    // Breathing zoom (always subtle, bass amplifies)
+    float breathe = sin(time * 0.4) * 0.001;
+    float zoom = 1.0 - 0.003 - breathe - bass * 0.012;
 
-    // Sample previous frame with warp (creates flowing trails)
+    vec2 warped_uv = 0.5 + (st - 0.5) * zoom + warp;
     vec3 feedback = texture(prev_frame, warped_uv).rgb;
 
-    // Fade the feedback (trails decay)
-    float fade = 0.96 + cpu_avg * 0.025;  // More CPU = longer trails
-    fade = min(fade, 0.995);
+    // Trail decay: always visible trails, CPU extends them
+    float fade = 0.94 + cpu_avg * 0.04;
+    fade = min(fade, 0.99);
     feedback *= fade;
 
-    // ── CPU Plasma Layer ──
-    // Flowing noise patterns driven by CPU activity
+    // ════════════════════════════════════════════════════════════
+    // LAYER 1: Flowing plasma (always active, CPU intensifies)
+    // ════════════════════════════════════════════════════════════
 
-    float cpu_noise_speed = 0.5 + cpu_avg * 2.0;
-    vec2 noise_coord = centered * (2.0 + cpu_avg * 3.0);
+    // Time flows always - CPU makes it flow faster
+    float flow_t = time * (0.3 + cpu_avg * 0.8);
 
-    float n1 = fbm(noise_coord + vec2(time * cpu_noise_speed * 0.3,
-                                       time * cpu_noise_speed * 0.2), 4);
-    float n2 = fbm(noise_coord * 1.5 + vec2(-time * 0.4, time * 0.3) + n1 * 0.5, 3);
+    // Domain warping: noise fed into noise = organic shapes
+    float n1 = fbm2(centered * 3.0 + vec2(flow_t * 0.4, flow_t * 0.3));
+    float n2 = fbm2(centered * 2.0 + vec2(n1 * 1.5, flow_t * -0.2));
 
-    // Domain warping for extra organic feel
-    float domain_warp = fbm(noise_coord + vec2(n1, n2) * 0.8 + time * 0.1, 3);
+    // Memory shifts the color palette over time
+    float hue_shift = mem_pct * 3.0 + time * 0.08;
+    vec3 plasma_col = palette(n2 * 0.6 + hue_shift,
+        vec3(0.5, 0.5, 0.5),
+        vec3(0.5, 0.5, 0.5),
+        vec3(1.0, 1.0, 1.0),
+        vec3(0.0 + mem_pct * 0.3, 0.33, 0.67 - mem_pct * 0.2)
+    );
 
-    // Color from memory-shifted palette
-    float palette_shift = mem_pct * 2.0 + time * 0.05;
-    vec3 plasma_color = cosmicPalette(domain_warp * 0.5 + palette_shift);
+    // Always add some plasma; CPU controls how much
+    float plasma_strength = 0.06 + cpu_avg * 0.15;
+    // Radial falloff - brighter near center
+    plasma_strength *= smoothstep(0.9, 0.1, r);
 
-    // CPU intensity controls how much new plasma is added
-    float plasma_intensity = cpu_avg * 0.15 + 0.02;
-    // Add more intensity near center (radial falloff)
-    plasma_intensity *= smoothstep(0.8, 0.0, r);
+    // ════════════════════════════════════════════════════════════
+    // LAYER 2: GPU lava lamp (always drifting, temp colors it)
+    // ════════════════════════════════════════════════════════════
 
-    // ── Audio Reactive Layer ──
+    float temp_norm = clamp(gpu_temp / 90.0, 0.0, 1.0);
+    float lava_speed = 0.2 + temp_norm * 0.4;
 
-    // Bass: radial pulse ring
-    float bass_ring = smoothstep(0.02, 0.0, abs(r - 0.2 - bass * 0.3));
-    bass_ring += smoothstep(0.03, 0.0, abs(r - 0.4 - bass * 0.15));
-    vec3 bass_color = vec3(0.9, 0.2, 0.5) * bass_ring * bass * 0.8;
+    // 4 metaball blobs with sinusoidal paths
+    float field = 0.0;
+    for (int i = 0; i < 4; i++) {
+        float fi = float(i);
+        float phase = fi * 1.618;
+        float bx = 0.3 + 0.4 * sin(time * lava_speed * 0.6 + phase * 2.1);
+        float by = 0.2 + 0.6 * (0.5 + 0.5 * sin(time * lava_speed * 0.35 + phase));
 
-    // Mid: spiral arms
-    float spiral = sin(angle * 3.0 + r * 10.0 - time * 2.0) * 0.5 + 0.5;
-    spiral *= smoothstep(0.6, 0.1, r);
-    vec3 mid_color = oceanPalette(spiral + time * 0.1) * spiral * mid * 0.3;
-
-    // Treb: sparkle/noise at high frequencies
-    float sparkle = snoise(st * 50.0 + time * 5.0);
-    sparkle = pow(max(sparkle, 0.0), 3.0);
-    vec3 treb_color = vec3(0.7, 0.8, 1.0) * sparkle * treb * 0.4;
-
-    // ── GPU Lava Lamp Layer ──
-
-    float temp_norm = clamp(gpu_temp / 100.0, 0.0, 1.0);
-    float mem_norm = gpu_mem;
-
-    float lava = lavaLamp(st, time, temp_norm, mem_norm);
-
-    // Smooth threshold for blob edges (sinusoidal boundary feel)
-    float lava_edge = smoothstep(0.8, 1.2, lava);
-    float lava_glow = smoothstep(0.3, 1.0, lava) * 0.3;
-
-    // Temperature-based color: cool blue → warm orange → hot red
-    vec3 lava_cool = vec3(0.1, 0.3, 0.8);
-    vec3 lava_warm = vec3(0.9, 0.5, 0.1);
-    vec3 lava_hot  = vec3(1.0, 0.15, 0.05);
-
-    vec3 lava_color;
-    if (temp_norm < 0.5) {
-        lava_color = mix(lava_cool, lava_warm, temp_norm * 2.0);
-    } else {
-        lava_color = mix(lava_warm, lava_hot, (temp_norm - 0.5) * 2.0);
+        // Sinusoidal wobble on blob boundary
+        float a = atan(st.y - by, st.x - bx);
+        float wobble = 1.0 + 0.25 * sin(a * 3.0 + time * 1.5 + fi)
+                           + 0.12 * sin(a * 5.0 - time + fi * 0.7);
+        float radius = (0.05 + gpu_mem * 0.04) * wobble;
+        float d = length(st - vec2(bx, by));
+        field += radius * radius / (d * d + 0.001);
     }
 
-    // Add internal glow variation
-    float lava_internal = snoise(st * 4.0 + time * 0.5) * 0.3 + 0.7;
-    lava_color *= lava_internal;
+    float lava_edge = smoothstep(0.6, 1.3, field);
+    float lava_glow = smoothstep(0.2, 0.8, field) * 0.25;
 
-    vec3 lava_layer = lava_color * (lava_edge + lava_glow);
+    // Temperature → color: cool teal → warm amber → hot magenta
+    vec3 lava_col;
+    if (temp_norm < 0.4) {
+        lava_col = mix(vec3(0.05, 0.4, 0.5), vec3(0.2, 0.6, 0.3), temp_norm * 2.5);
+    } else if (temp_norm < 0.7) {
+        lava_col = mix(vec3(0.2, 0.6, 0.3), vec3(0.9, 0.5, 0.1), (temp_norm - 0.4) * 3.3);
+    } else {
+        lava_col = mix(vec3(0.9, 0.5, 0.1), vec3(1.0, 0.15, 0.3), (temp_norm - 0.7) * 3.3);
+    }
 
-    // ── Composite all layers ──
+    vec3 lava_layer = lava_col * (lava_edge + lava_glow);
 
-    vec3 color = feedback;                          // Feedback trails
-    color += plasma_color * plasma_intensity;       // CPU plasma
-    color += bass_color;                            // Audio bass rings
-    color += mid_color;                             // Audio mid spirals
-    color += treb_color;                            // Audio treb sparkle
-    color = max(color, lava_layer * 0.7);           // GPU lava lamp (blended)
+    // ════════════════════════════════════════════════════════════
+    // LAYER 3: Audio reactive (rings, spirals, sparkle)
+    // ════════════════════════════════════════════════════════════
 
-    // ── Vignette (subtle darkening at edges) ──
-    float vignette = 1.0 - smoothstep(0.4, 1.2, r / aspect * 2.0);
-    color *= mix(0.6, 1.0, vignette);
+    // Bass: expanding rings from center
+    float ring1 = smoothstep(0.025, 0.0, abs(r - 0.15 - bass * 0.35));
+    float ring2 = smoothstep(0.02, 0.0, abs(r - 0.35 - bass * 0.2));
+    vec3 bass_col = vec3(0.9, 0.2, 0.6) * (ring1 + ring2 * 0.6) * (bass + 0.05);
 
-    // ── Final tone mapping ──
-    color = color / (color + 1.0);  // Reinhard tone mapping
-    color = pow(color, vec3(0.95));  // Slight gamma for richness
+    // Mid: spiral arms
+    float spiral = sin(angle * 4.0 + r * 12.0 - time * 2.5) * 0.5 + 0.5;
+    spiral *= smoothstep(0.6, 0.05, r);
+    vec3 mid_col = palette(spiral + time * 0.1,
+        vec3(0.5), vec3(0.5), vec3(1.0, 1.0, 0.5), vec3(0.8, 0.9, 0.3)
+    ) * spiral * (mid * 0.6 + 0.02);
+
+    // Treb: shimmer
+    float sparkle = noise(st * 30.0 + time * 4.0);
+    sparkle = pow(max(sparkle - 0.3, 0.0), 2.0) * 2.0;
+    vec3 treb_col = vec3(0.6, 0.8, 1.0) * sparkle * (treb * 0.5 + 0.01);
+
+    // ════════════════════════════════════════════════════════════
+    // COMPOSITE
+    // ════════════════════════════════════════════════════════════
+
+    vec3 color = feedback;                        // Trails from previous frames
+    color += plasma_col * plasma_strength;        // CPU plasma (always some)
+    color += bass_col;                            // Audio bass rings
+    color += mid_col;                             // Audio mid spirals
+    color += treb_col;                            // Audio treble sparkle
+    color = max(color, lava_layer * 0.65);        // GPU lava lamp overlay
+
+    // Gentle vignette
+    float vignette = 1.0 - smoothstep(0.5, 1.4, r / aspect * 2.0);
+    color *= mix(0.7, 1.0, vignette);
+
+    // Tone mapping (prevents blowout)
+    color = color / (color + 0.8);
+    color = pow(color, vec3(0.92));
 
     fragColor = vec4(color, 1.0);
 }
 """
 
-# Display pass (just renders texture to screen)
+# Pass-through display shader
 DISPLAY_FRAGMENT = """
 #version 330 core
 uniform sampler2D tex;
@@ -321,6 +251,8 @@ void main() {
 
 class ShaderVisualizer:
     """MilkDrop-style shader visualizer with feedback loop."""
+
+    TARGET_FPS = 30  # 30fps to keep GT540M cool
 
     def __init__(self, width: int = 1920, height: int = 1080, fullscreen: bool = False):
         pygame.init()
@@ -338,7 +270,6 @@ class ShaderVisualizer:
 
         # Create moderngl context from existing pygame GL context
         self.ctx = moderngl.create_context()
-        self.ctx.enable(moderngl.BLEND)
 
         # Fullscreen quad vertices (position + uv)
         vertices = np.array([
@@ -350,7 +281,7 @@ class ShaderVisualizer:
 
         self.vbo = self.ctx.buffer(vertices.tobytes())
 
-        # Main visualization program
+        # Compile shaders
         self.main_prog = self.ctx.program(
             vertex_shader=VERTEX_SHADER,
             fragment_shader=FRAGMENT_SHADER,
@@ -360,7 +291,6 @@ class ShaderVisualizer:
             [(self.vbo, '2f 2f', 'in_position', 'in_uv')],
         )
 
-        # Display program (renders FBO to screen)
         self.display_prog = self.ctx.program(
             vertex_shader=VERTEX_SHADER,
             fragment_shader=DISPLAY_FRAGMENT,
@@ -371,25 +301,25 @@ class ShaderVisualizer:
         )
 
         # Ping-pong framebuffers for feedback loop
-        self.tex_a = self.ctx.texture((width, height), 4, dtype='f2')
-        self.tex_b = self.ctx.texture((width, height), 4, dtype='f2')
-        self.tex_a.filter = (moderngl.LINEAR, moderngl.LINEAR)
-        self.tex_b.filter = (moderngl.LINEAR, moderngl.LINEAR)
-        self.tex_a.repeat_x = False
-        self.tex_a.repeat_y = False
-        self.tex_b.repeat_x = False
-        self.tex_b.repeat_y = False
+        # Use half resolution for performance on GT540M
+        fb_w, fb_h = width // 2, height // 2
+        self.fb_w, self.fb_h = fb_w, fb_h
+        self.tex_a = self.ctx.texture((fb_w, fb_h), 4, dtype='f2')
+        self.tex_b = self.ctx.texture((fb_w, fb_h), 4, dtype='f2')
+        for tex in (self.tex_a, self.tex_b):
+            tex.filter = (moderngl.LINEAR, moderngl.LINEAR)
+            tex.repeat_x = False
+            tex.repeat_y = False
 
         self.fbo_a = self.ctx.framebuffer(color_attachments=[self.tex_a])
         self.fbo_b = self.ctx.framebuffer(color_attachments=[self.tex_b])
+        self.ping = True
 
-        self.ping = True  # Toggle for ping-pong
-
-        # Smoothed values for visual stability
+        # Smoothed values
         self.smooth = {
-            'cpu_avg': 0.0, 'mem_pct': 0.0, 'swap_pct': 0.0,
+            'cpu_avg': 0.0, 'mem_pct': 0.0,
             'core0': 0.0, 'core1': 0.0, 'core2': 0.0, 'core3': 0.0,
-            'load_avg': 0.0, 'gpu_temp': 0.0, 'gpu_mem': 0.0,
+            'gpu_temp': 0.0, 'gpu_mem': 0.0,
             'bass': 0.0, 'mid': 0.0, 'treb': 0.0,
         }
 
@@ -410,13 +340,11 @@ class ShaderVisualizer:
         audio = data.get('audio', {})
 
         self._set_uniform('time', self.time)
-        self._set_uniform('resolution', (float(self.width), float(self.height)))
+        self._set_uniform('resolution', (float(self.fb_w), float(self.fb_h)))
 
-        # CPU (normalize to 0-1)
+        # CPU (0-1)
         self._set_uniform('cpu_avg', self._smooth('cpu_avg', htop.get('cpu_avg', 0) / 100.0))
         self._set_uniform('mem_pct', self._smooth('mem_pct', htop.get('memory', 0) / 100.0))
-        self._set_uniform('swap_pct', self._smooth('swap_pct', htop.get('swap', 0) / 100.0))
-        self._set_uniform('load_avg', self._smooth('load_avg', htop.get('load_avg', 0) / 100.0))
 
         cores = (
             self._smooth('core0', htop.get('core0', 0) / 100.0),
@@ -430,7 +358,7 @@ class ShaderVisualizer:
         self._set_uniform('gpu_temp', self._smooth('gpu_temp', nvidia.get('temperature', 0), 0.05))
         self._set_uniform('gpu_mem', self._smooth('gpu_mem', nvidia.get('memory_percent', 0) / 100.0, 0.05))
 
-        # Audio (more responsive smoothing)
+        # Audio (faster smoothing for responsiveness)
         self._set_uniform('bass', self._smooth('bass', audio.get('bass', 0) / 100.0, 0.4))
         self._set_uniform('mid', self._smooth('mid', audio.get('mid', 0) / 100.0, 0.35))
         self._set_uniform('treb', self._smooth('treb', audio.get('treb', 0) / 100.0, 0.3))
@@ -446,10 +374,10 @@ class ShaderVisualizer:
                 elif event.key == pygame.K_f:
                     pygame.display.toggle_fullscreen()
 
-        dt = self.clock.tick(60) / 1000.0
+        dt = self.clock.tick(self.TARGET_FPS) / 1000.0
         self.time += dt
 
-        # Ping-pong: read from one texture, write to the other
+        # Ping-pong
         if self.ping:
             read_tex, write_fbo = self.tex_a, self.fbo_b
             result_tex = self.tex_b
@@ -458,15 +386,17 @@ class ShaderVisualizer:
             result_tex = self.tex_a
         self.ping = not self.ping
 
-        # ── Main pass: render to FBO ──
+        # Render to FBO (at half resolution)
         write_fbo.use()
+        self.ctx.viewport = (0, 0, self.fb_w, self.fb_h)
         read_tex.use(location=0)
         self.main_prog['prev_frame'].value = 0
         self._set_uniforms(data)
         self.main_vao.render(moderngl.TRIANGLE_STRIP)
 
-        # ── Display pass: render FBO to screen ──
+        # Display FBO to screen (upscaled by linear filtering)
         self.ctx.screen.use()
+        self.ctx.viewport = (0, 0, self.width, self.height)
         result_tex.use(location=0)
         self.display_prog['tex'].value = 0
         self.display_vao.render(moderngl.TRIANGLE_STRIP)
@@ -476,14 +406,9 @@ class ShaderVisualizer:
 
     def cleanup(self):
         """Release resources."""
-        self.fbo_a.release()
-        self.fbo_b.release()
-        self.tex_a.release()
-        self.tex_b.release()
-        self.main_vao.release()
-        self.display_vao.release()
-        self.vbo.release()
-        self.main_prog.release()
-        self.display_prog.release()
+        for obj in (self.fbo_a, self.fbo_b, self.tex_a, self.tex_b,
+                    self.main_vao, self.display_vao, self.vbo,
+                    self.main_prog, self.display_prog):
+            obj.release()
         self.ctx.release()
         pygame.quit()
